@@ -1,10 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+};
 
 mod connect;
 mod parse;
 mod ssl_mode;
 
 use crate::{connection::LogSettings, net::tls::CertificateInput};
+use sqlx_core::net::tls::TlsConnector;
 pub use ssl_mode::MySqlSslMode;
 
 /// Options and flags which can be used to configure a MySQL connection.
@@ -67,10 +71,7 @@ pub struct MySqlConnectOptions {
     pub(crate) username: String,
     pub(crate) password: Option<String>,
     pub(crate) database: Option<String>,
-    pub(crate) ssl_mode: MySqlSslMode,
-    pub(crate) ssl_ca: Option<CertificateInput>,
-    pub(crate) ssl_client_cert: Option<CertificateInput>,
-    pub(crate) ssl_client_key: Option<CertificateInput>,
+    pub(crate) ssl_options: SslOptions,
     pub(crate) statement_cache_capacity: usize,
     pub(crate) charset: String,
     pub(crate) collation: Option<String>,
@@ -89,6 +90,15 @@ impl Default for MySqlConnectOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SslOptions {
+    pub(crate) ssl_mode: MySqlSslMode,
+    pub(crate) ssl_ca: Option<CertificateInput>,
+    pub(crate) ssl_client_cert: Option<CertificateInput>,
+    pub(crate) ssl_client_key: Option<CertificateInput>,
+    pub(crate) cached_connector: Arc<OnceLock<TlsConnector>>,
+}
+
 impl MySqlConnectOptions {
     /// Creates a new, default set of options ready for configuration
     pub fn new() -> Self {
@@ -101,10 +111,13 @@ impl MySqlConnectOptions {
             database: None,
             charset: String::from("utf8mb4"),
             collation: None,
-            ssl_mode: MySqlSslMode::Preferred,
-            ssl_ca: None,
-            ssl_client_cert: None,
-            ssl_client_key: None,
+            ssl_options: SslOptions {
+                ssl_mode: MySqlSslMode::Preferred,
+                ssl_ca: None,
+                ssl_client_cert: None,
+                ssl_client_key: None,
+                cached_connector: Arc::new(OnceLock::new()),
+            },
             statement_cache_capacity: 100,
             log_settings: Default::default(),
             pipes_as_concat: true,
@@ -160,6 +173,11 @@ impl MySqlConnectOptions {
         self
     }
 
+    fn ssl_options_mut(&mut self) -> &mut SslOptions {
+        Arc::make_mut(&mut self.ssl_options.cached_connector).take();
+        &mut self.ssl_options
+    }
+
     /// Sets whether or with what priority a secure SSL TCP/IP connection will be negotiated
     /// with the server.
     ///
@@ -174,7 +192,7 @@ impl MySqlConnectOptions {
     ///     .ssl_mode(MySqlSslMode::Required);
     /// ```
     pub fn ssl_mode(mut self, mode: MySqlSslMode) -> Self {
-        self.ssl_mode = mode;
+        self.ssl_options_mut().ssl_mode = mode;
         self
     }
 
@@ -189,7 +207,7 @@ impl MySqlConnectOptions {
     ///     .ssl_ca("path/to/ca.crt");
     /// ```
     pub fn ssl_ca(mut self, file_name: impl AsRef<Path>) -> Self {
-        self.ssl_ca = Some(CertificateInput::File(file_name.as_ref().to_owned()));
+        self.ssl_options_mut().ssl_ca = Some(CertificateInput::File(file_name.as_ref().to_owned()));
         self
     }
 
@@ -204,7 +222,7 @@ impl MySqlConnectOptions {
     ///     .ssl_ca_from_pem(vec![]);
     /// ```
     pub fn ssl_ca_from_pem(mut self, pem_certificate: Vec<u8>) -> Self {
-        self.ssl_ca = Some(CertificateInput::Inline(pem_certificate));
+        self.ssl_options_mut().ssl_ca = Some(CertificateInput::Inline(pem_certificate));
         self
     }
 
@@ -219,7 +237,8 @@ impl MySqlConnectOptions {
     ///     .ssl_client_cert("path/to/client.crt");
     /// ```
     pub fn ssl_client_cert(mut self, cert: impl AsRef<Path>) -> Self {
-        self.ssl_client_cert = Some(CertificateInput::File(cert.as_ref().to_path_buf()));
+        self.ssl_options_mut().ssl_client_cert =
+            Some(CertificateInput::File(cert.as_ref().to_path_buf()));
         self
     }
 
@@ -244,7 +263,8 @@ impl MySqlConnectOptions {
     ///     .ssl_client_cert_from_pem(CERT);
     /// ```
     pub fn ssl_client_cert_from_pem(mut self, cert: impl AsRef<[u8]>) -> Self {
-        self.ssl_client_cert = Some(CertificateInput::Inline(cert.as_ref().to_vec()));
+        self.ssl_options_mut().ssl_client_cert =
+            Some(CertificateInput::Inline(cert.as_ref().to_vec()));
         self
     }
 
@@ -259,7 +279,8 @@ impl MySqlConnectOptions {
     ///     .ssl_client_key("path/to/client.key");
     /// ```
     pub fn ssl_client_key(mut self, key: impl AsRef<Path>) -> Self {
-        self.ssl_client_key = Some(CertificateInput::File(key.as_ref().to_path_buf()));
+        self.ssl_options_mut().ssl_client_key =
+            Some(CertificateInput::File(key.as_ref().to_path_buf()));
         self
     }
 
@@ -284,7 +305,8 @@ impl MySqlConnectOptions {
     ///     .ssl_client_key_from_pem(KEY);
     /// ```
     pub fn ssl_client_key_from_pem(mut self, key: impl AsRef<[u8]>) -> Self {
-        self.ssl_client_key = Some(CertificateInput::Inline(key.as_ref().to_vec()));
+        self.ssl_options_mut().ssl_client_key =
+            Some(CertificateInput::Inline(key.as_ref().to_vec()));
         self
     }
 
@@ -508,7 +530,7 @@ impl MySqlConnectOptions {
     /// assert!(matches!(options.get_ssl_mode(), MySqlSslMode::Preferred));
     /// ```
     pub fn get_ssl_mode(&self) -> MySqlSslMode {
-        self.ssl_mode
+        self.ssl_options.ssl_mode
     }
 
     /// Get the server charset.
